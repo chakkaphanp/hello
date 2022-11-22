@@ -1,0 +1,4 @@
+set curtime=
+for /f "tokens=*" %%x in ('powershell -NoLogo -NonInteractive -OutputFormat Text -Command "[DateTime]::Now.ToString(\"yy-MM-dd\")"') do set curtime=%%x
+echo %curtime%
+PAUSE
