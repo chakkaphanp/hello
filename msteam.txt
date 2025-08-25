@@ -1,0 +1,101 @@
+# --- Native interop (load once) ---
+if (-not ("Native.Win32" -as [type])) {
+$code = @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace Native {
+  public static class Win32 {
+    // ----- Idle time -----
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+
+    [DllImport("user32.dll")]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+    public static uint GetIdleMilliseconds() {
+      LASTINPUTINFO lii = new LASTINPUTINFO();
+      lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+      if (!GetLastInputInfo(ref lii)) return 0;
+      unchecked { return (uint)Environment.TickCount - lii.dwTime; }
+    }
+
+    // ----- SendInput (Left-Shift tap) -----
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT {
+      public ushort wVk;
+      public ushort wScan;
+      public uint   dwFlags;
+      public uint   time;
+      public IntPtr dwExtraInfo;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT {
+      public uint type;     // 1 = keyboard
+      public KEYBDINPUT ki; // we only need keyboard
+    }
+
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    public const uint INPUT_KEYBOARD = 1;
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const ushort VK_LSHIFT = 0xA0;
+
+    public static void TapShift() {
+      INPUT down = new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = VK_LSHIFT } };
+      INPUT up   = new INPUT { type = INPUT_KEYBOARD, ki = new KEYBDINPUT { wVk = VK_LSHIFT, dwFlags = KEYEVENTF_KEYUP } };
+      INPUT[] seq = new INPUT[] { down, up };
+      SendInput((uint)seq.Length, seq, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    // ----- Prevent sleep/display-off -----
+    [DllImport("kernel32.dll")]
+    static extern uint SetThreadExecutionState(uint esFlags);
+    const uint ES_CONTINUOUS = 0x80000000;
+    const uint ES_SYSTEM_REQUIRED = 0x00000001;
+    const uint ES_DISPLAY_REQUIRED = 0x00000002;
+
+    public static void HoldAwake() {
+      SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+    }
+    public static void ClearAwake() {
+      SetThreadExecutionState(ES_CONTINUOUS); // clears requirements
+    }
+  }
+}
+"@
+
+  Add-Type -TypeDefinition $code -Language CSharp
+}
+
+
+# --- Main loop ---
+$bufferSeconds = 15 # send nudge a little before Teams' away timeout
+$checkEvery = 5     # seconds between checks
+
+try {
+    if ($NoSleep) { [Native.Win32]::HoldAwake() }
+
+    Write-Host "Keeping Teams 'Available'... (Ctrl+C to stop)"
+    Write-Host "Interval: $IntervalSeconds s | Sleep prevention: $($NoSleep.IsPresent)"
+
+    while ($true) {
+        $idleMs = [Native.Win32]::GetIdleMilliseconds()
+        $idleSec = [math]::Round($idleMs / 1000.0, 1)
+
+        # Only nudge if you're actually idle and near the threshold
+        if ($idleSec -ge ($IntervalSeconds - $bufferSeconds)) {
+            [Native.Win32]::TapShift()
+            # Optional: log to console occasionally
+            Write-Host ("Nudged at idle {0}s" -f $idleSec)
+            Start-Sleep -Seconds ($IntervalSeconds / 2)
+        } else {
+            Start-Sleep -Seconds $checkEvery
+        }
+    }
+}
+finally {
+    if ($NoSleep) { [Native.Win32]::ClearAwake() }
+    Write-Host "Stopped. Sleep/display requirements cleared."
+}
